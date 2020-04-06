@@ -1,0 +1,4 @@
+(library
+ (name jit)
+ (libraries llvm llvm.executionengine)
+)
