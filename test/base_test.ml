@@ -37,26 +37,22 @@ let test_jit_record _ =
   let x = getf res jit_record_x in
   assert_equal (Int64.of_int 1) (Signed.Long.to_int64 x) ~printer:Int64.to_string
 
-(* let test_jit_int _ =
-  let deps = CodeGenDeps.of_context (Llvm.global_context ()) in
-  let mm = ModManager.of_string deps "test_jit_int" in
-  let thunk = ModManager.thunk mm (Int 1) in
-  assert (not (ModManager.run_fun mm thunk));
-  assert (Llvm_executionengine.initialize ());
-  let engine = ModManager.with_mod mm (fun m -> Llvm_executionengine.create m) in
-  let _ = ModManager.with_mod mm (fun m -> Llvm.dump_module m) in
-  let open Ctypes in
-  let ft = Foreign.funptr (Ctypes.void @-> (returning Ctypes.int64_t)) in
-  let f = Llvm_executionengine.get_function_address "th" ft engine in
-  let res = f () in
-  assert_equal (Int64.of_int 1) res ~printer:Int64.to_string
- *)
+let test_get_field _ =
+  let get_x = Bind ( "get_x"
+                   , Fun { args = [("r", TRecord { members = [("x", TInt)]; row = Option.none })]
+                         ; body = (TInt, Get_field (Var "r", "x"))
+                })
+  in
+  let expr = Apply ("get_x", [Record [{ field_name = "x"; typ = TInt; v = Int 5 }]]) in
+  let mm = ModManager.create (CodeGenDeps.of_context (Llvm.global_context ())) [get_x] in
+  let res = ModManager.exec mm expr (Ctypes.int64_t) in
+  assert_equal (Int64.of_int 5) res ~printer:Int64.to_string  
   
 let suite =
   "Base tests to iterate with" >:::
     [ "Intertpreter field get" >:: test_interp_get_field
     ; "MCJIT create record/structure." >:: test_jit_record
-                                             (* ; "MCJIT create int." >:: test_jit_int *)
+    ; "MCJIT get a field with a JIT compiled function" >:: test_get_field
     ]
    
 let _ =

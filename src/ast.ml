@@ -1,10 +1,11 @@
 type expr = Record of record_member list
-         | Int of int
-         | Fun of { args : (string * typ) list
-                  ; body : (typ * expr)
-                  }
-         | Apply of string * (expr list)
-         | Get_field of expr * string
+          | Int of int
+          | Var of string
+          | Fun of { args : (string * typ) list
+                   ; body : (typ * expr)
+                   }
+          | Apply of string * (expr list)
+          | Get_field of expr * string
 and record_member = { field_name : string
                     ; typ : typ
                     ; v : expr
