@@ -15,7 +15,7 @@ let test_interp_get_field _ =
 type jit_record
   
 let test_jit_record _ =
-  let cg = Code_gen.create [] in
+  let rt = Runtime.create [] in
   let record = Record [{ field_name = "x"
                        ; typ = TInt
                        ; v = Int 1 }]
@@ -27,8 +27,7 @@ let test_jit_record _ =
   let jit_record_x = field jit_record "x" Ctypes.long in
   seal jit_record;
 
-  let _ = Code_gen.with_mod cg (fun m -> Llvm.dump_module m) in
-  let res = Code_gen.exec cg record jit_record in
+  let res = Runtime.exec rt record jit_record in
 
   (* Extract the x field from the return value.  *)
   let x = getf res jit_record_x in
@@ -41,8 +40,8 @@ let test_get_field _ =
                 })
   in
   let expr = Apply ("get_x", [Record [{ field_name = "x"; typ = TInt; v = Int 5 }]]) in
-  let cg = Code_gen.create [get_x] in
-  let res = Code_gen.exec cg expr (Ctypes.int64_t) in
+  let rt = Runtime.create [get_x] in
+  let res = Runtime.exec rt expr (Ctypes.int64_t) in
   assert_equal (Int64.of_int 5) res ~printer:Int64.to_string  
   
 let suite =

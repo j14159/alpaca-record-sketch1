@@ -10,7 +10,7 @@ type t = { bindings : (string, Ast.expr) Hashtbl.t
 
 let create
       ?context:(ctx = global_context ())
-      ?mod_name:(mn = "a_module")
+      ?m:(m = create_module ctx "a_module")
       bindings =
   let bs = Hashtbl.create (List.length bindings) in
   List.iter (fun (Bind (name, expr)) ->
@@ -25,7 +25,7 @@ let create
     ; llvm_context = ctx
     ; builder = builder ctx
     ; bindings = bs
-    ; m = create_module ctx mn
+    ; m
   }
 
 (* I think this pair of functions is poorly thought-out. *)
@@ -171,17 +171,5 @@ let bind_gen ({ m = a_mod; builder = b; llvm_context = c; _ } as deps) = functio
      f
   | _ ->
      failwith "Unsupported expression to bind."
-
-let exec ?name:(name="th") ({ m; _ } as deps) expr ctyp =
-    let ast = (Bind (name, Fun { args = []; body = (typ_of deps expr, expr) })) in
-    let thunk = bind_gen deps ast in
-    let pm = PassManager.create_function m in
-    assert (Llvm_executionengine.initialize ());
-    assert (not (PassManager.run_function thunk pm));
-    let engine = Llvm_executionengine.create m in
-    let open Ctypes in
-    let actual_ctype = Foreign.funptr (Ctypes.void @-> (returning ctyp)) in 
-    let f = Llvm_executionengine.get_function_address name actual_ctype engine in
-    f ()
 
 let with_mod { m; _ } f = f m
