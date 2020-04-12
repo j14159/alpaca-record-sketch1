@@ -33,6 +33,12 @@ let test_jit_record _ =
   let x = getf res jit_record_x in
   assert_equal (Int64.of_int 1) (Signed.Long.to_int64 x) ~printer:Int64.to_string
 
+let test_int_identity _ =
+  let int_id = Bind ("int_id", c_fun [("x", TInt)] (TInt, Var "x")) in
+  let expr = Apply ("int_id", [Int 13]) in
+  let rt = Runtime.create ~mod_name:"int_identity" [int_id] in
+  assert_equal (Int64.of_int 13) (Runtime.exec rt expr Ctypes.int64_t)
+
 let test_get_field _ =
   let get_x = Bind ( "get_x"
                    , Fun { args = [("r", TRecord { members = [("x", TInt)]; row = Option.none })]
@@ -49,6 +55,7 @@ let suite =
     [ "Intertpreter field get" >:: test_interp_get_field
     ; "MCJIT create record/structure." >:: test_jit_record
     ; "MCJIT get a field with a JIT compiled function" >:: test_get_field
+    ; "MCJIT execute an integer identity function" >:: test_int_identity
     ]
    
 let _ =

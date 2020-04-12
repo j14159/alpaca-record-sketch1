@@ -10,7 +10,7 @@ val create : ?context : llcontext -> ?m : llmodule -> Ast.bind list -> t
 val get_type : t -> Ast.typ -> lltype
 
 (* Generate LLVM IR for the provided [Ast.expr].  *)
-val code_gen : t -> Ast.expr -> llvalue
+val code_gen : t -> (string, llvalue) Hashtbl.t -> Ast.expr -> llvalue
 
 val bind_gen : t -> Ast.bind -> llvalue
 

@@ -1,6 +1,10 @@
 type expr = Record of record_member list
           | Int of int
           | Var of string
+          (* This should also have type variables up front so that record row
+             variables can be properly reused.  This would also be a
+             prerequisite for "ordinary" generics (System-F with prenex).
+           *)
           | Fun of { args : (string * typ) list
                    ; body : (typ * expr)
                    }
