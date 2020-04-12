@@ -1,6 +1,8 @@
 open Ast
 open Llvm
 
+exception Record_too_small
+
 type t = { bindings : (string, Ast.expr) Hashtbl.t
          ; type_dict : (string, lltype) Hashtbl.t
          ; llvm_context : llcontext
@@ -140,13 +142,78 @@ and gen_apply deps name args =
   | _ ->
      failwith "No apply JIT yet."
 
+(* Given a function in [expr] and a list of argument types that are going to be
+   applied to it, specialize the record arguments in [expr] so that they
+   precisely match those in [arg_types].  All specialized record arguments must
+   be closed at the end of this (no row variable).
+
+   TODO:  test this without leaking it.
+ *)
+and specialize_proto expr arg_types =
+  match expr with
+  | Fun { args; body } ->
+     if List.length args != List.length arg_types then
+       failwith "Incorrect number of arguments to a function"
+     else
+       (* check arg against submitted type, expand records, reject mismatch. *)
+       let rec f (n, a) b =
+         match a, b with
+         (* The actual row variable isn't checked right now.  This means that if
+            two different record arguments have the same row variable as a
+            constraint, specialization won't respect this.  My optimistic
+            assumption is a well-behaved type checker has done this check before
+            constructing the AST that reaches code generation.
+          *)
+         | TRecord { members = m1; row }, TRecord { members = m2; _ } ->
+            let _ = if List.length m1 > List.length m2 then
+                      raise Record_too_small
+                    else
+                      ()
+            in
+
+            (* Check that m2 covers m1 by recursing to specialize the each
+               member.  This covers our equality check as well as specializing
+               records within records.
+
+               Deliberately shadowing m1 here and this provides no useful
+               feedback when m2 is missing something required by m1.
+             *)
+            let m1 = List.map (fun (n, t) -> (f (n, t) (List.assoc n m2))) m1 in
+            (* Strip m1 members from m2, leaving only the ones that fit into the
+               row variable:
+             *)
+            let m2 = List.fold_left (fun acc (n, _) -> List.remove_assoc n acc) m2 m1 in
+            if List.length m2 > 0 && Option.is_none row then
+              failwith ("Record argument " ^ n ^ " is not open (no row variable).")
+            else
+              (* Composite record:  *)
+              (n, TRecord { members = List.append m1 m2; row = None })
+
+         | a, b when a = b ->
+            (n, a)
+         | _, _ ->
+            failwith "Function and argument types do not match."
+       in
+       Fun { args = List.map2 f args arg_types; body }
+  | _ ->
+     failwith "Can only specialize functions."
 (* Check to see if a monomorphized function has aleady been generated in the
    LLVM module.
  *)
-and lookup_fun { m; _ } name arg_types =
+and lookup_fun ({ m; bindings; _ } as deps) name arg_types =
   let n = synth_fun_name name arg_types in
+
+  let lookup_binding _ =
+    match Hashtbl.find_opt bindings name with
+    | None -> failwith (name ^ " is not bound")
+    | Some expr -> expr
+  in
+
   match lookup_function n m with
   | None ->
+     let expr = lookup_binding () in
+     let specialized = specialize_proto expr arg_types in
+     let _ = bind_gen deps (Bind (n, specialized)) in
      failwith "No generation of functions yet."
   | Some _ ->
      Some n
@@ -154,7 +221,7 @@ and lookup_fun { m; _ } name arg_types =
 (* Given an { Ast.bind }, generate LLVM IR for it in the module we're using for
    code generation.
  *)
-let bind_gen ({ m = a_mod; builder = b; llvm_context = c; _ } as deps) = function
+and bind_gen ({ m = a_mod; builder = b; llvm_context = c; _ } as deps) = function
   | Bind (name, Fun { args; body = (ret_typ, expr) }) ->
      let ll_ret_typ = get_type deps ret_typ in
      let args_arr = List.map (fun (_, t) -> get_type deps t) args
@@ -173,3 +240,81 @@ let bind_gen ({ m = a_mod; builder = b; llvm_context = c; _ } as deps) = functio
      failwith "Unsupported expression to bind."
 
 let with_mod { m; _ } f = f m
+
+(*
+   In-line tests for specializing function prototypes.
+
+   Inline because I didn't want to expose specialize_proto from this module.
+ *)
+let%test "Specializing to wrong types should fail" =
+  try
+    let _ = specialize_proto (c_fun [c_arg "x" TInt] (TInt, Var "x")) [TFun] in
+    false
+  with
+    Failure _ -> true
+
+let%test "Specializing matching records should pass" =
+  (* Need this to get the type of arg1 later:  *)
+  let cg = create [] in
+  (* Throwaway function body here, just checking specialization:  *)
+  let f = c_fun [("r", c_rectyp [("x", TInt)] (Some "r"))] (TInt, Int 1) in
+  let arg1 = Record [c_field "x" TInt (Int 1)] in
+  let t_arg1 = typ_of cg arg1 in
+  let res = specialize_proto f [t_arg1] in
+  let expected_typ = c_rectyp [("x", TInt)] None in
+  match res with
+  | Fun { args = [(_, res_arg1)]; _ } ->
+     t_arg1 = res_arg1 && t_arg1 = expected_typ
+  | _ ->
+     false
+
+let%test "Specializing to a wider record should grow the type" =
+  (* Need this to get the type of arg1 later:  *)
+  let cg = create [] in
+  (* Throwaway function body here, just checking specialization:  *)
+  let f = c_fun [("r", c_rectyp [("x", TInt)] (Some "r"))] (TInt, Int 1) in
+  let arg1 = Record [c_field "x" TInt (Int 1); c_field "y" TInt (Int 2)] in
+  let t_arg1 = typ_of cg arg1 in
+  let res = specialize_proto f [t_arg1] in
+  [%test_match? (Fun { args = [( "r"
+                               , TRecord { members = [ ("x", TInt)
+                                                     ; ("y", TInt)
+                                                     ]
+                                         ; row = None } )]
+                     ; _ })]
+    res;
+  true
+
+let%test "Trying to specialize to a smaller record should fail." =
+  (* Need this to get the type of arg1 later:  *)
+  let cg = create [] in
+  (* Throwaway function body here, just checking specialization:  *)
+  let f =
+    c_fun [("r", c_rectyp [("x", TInt); ("y", TInt)] (Some "r"))] (TInt, Int 1)
+  in
+  let arg1 = Record [c_field "x" TInt (Int 1)] in
+  let t_arg1 = typ_of cg arg1 in
+  try let _ = specialize_proto f [t_arg1] in false with Record_too_small -> true
+
+let%test "Specializing a TInt -> TRecord -> TInt function only touches the record." =
+  (* Need this to get the type of arg1 later:  *)
+  let cg = create [] in
+  (* Throwaway function body here, just checking specialization:  *)
+  let f =
+    c_fun [ ("a", TInt)
+          ; ("r", c_rectyp [("x", TInt)] (Some "r"))]
+      (TInt, Int 1)
+  in
+  let arg1 = Int 1 in
+  let arg2 = Record [c_field "x" TInt (Int 1); c_field "y" TInt (Int 2)] in
+  let t_arg1 = typ_of cg arg1 in
+  let t_arg2 = typ_of cg arg2 in
+  let res = specialize_proto f [t_arg1; t_arg2] in
+  [%test_match? Fun { args = [ ("a", TInt)
+                             ; ("r", TRecord { members = [ ("x", TInt)
+                                                         ; ("y", TInt)
+                                                         ]
+                                             ; row = None })]
+                    ; body = _ }]
+    res;
+  true

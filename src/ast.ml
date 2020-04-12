@@ -21,3 +21,8 @@ and typ = TRecord of { members : (string * typ) list
 
 (* Intending only function support for now.  *)
 type bind = Bind of string * expr
+
+let c_field field_name typ v = { field_name; typ; v }
+let c_rectyp members row = TRecord { members; row }
+let c_fun args body = Fun { args; body }
+let c_arg name t = (name, t)

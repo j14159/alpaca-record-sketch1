@@ -19,7 +19,7 @@ let exec ?name:(name="th") { m; cg } expr ctyp =
   let ast = (Bind (name, Fun { args = []; body = (Code_gen.typ_of cg expr, expr) })) in
   let thunk = Code_gen.bind_gen cg ast in
   (* TODO:  make this conditional on something in `t`:  *)
-  dump_module m;
+  (* dump_module m; *)
   let pm = PassManager.create_function m in
   assert (Llvm_executionengine.initialize ());
   assert (not (PassManager.run_function thunk pm));
