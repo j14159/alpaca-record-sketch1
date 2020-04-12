@@ -253,7 +253,6 @@ and lookup_fun ({ m; bindings; llvm_context = c; _ } as deps) name arg_types =
  *)
 and bind_gen ({ m = a_mod; builder = b; llvm_context = c; pm; _ } as deps) = function
   | Bind (name, Fun { args; body = (ret_typ, expr) }) ->
-     print_endline ("Binding fun " ^ name);
      let ll_ret_typ = get_type deps ret_typ in
      let env = Hashtbl.create 10 in
      let args_arr = List.map (fun (_, t) -> get_type deps t) args
