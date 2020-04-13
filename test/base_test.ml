@@ -9,7 +9,7 @@ let test_interp_get_field _ =
                        ; typ = TInt
                        ; v = Int 1}]
   in
-  let res = interp_eval [] (Get_field (record, "x")) in
+  let res = interp_eval [] (Get_field ("x", record, TInt)) in
   assert_equal (Int 1) res
 
 type jit_record
@@ -27,7 +27,8 @@ let test_jit_record _ =
   let jit_record_x = field jit_record "x" Ctypes.long in
   seal jit_record;
 
-  let res = Runtime.exec rt record jit_record in
+  let res = make jit_record in
+  let _ = Runtime.exec ~dump_module:true rt record (Ctypes.ptr jit_record) jit_record (addr res) in
 
   (* Extract the x field from the return value.  *)
   let x = getf res jit_record_x in
@@ -37,17 +38,20 @@ let test_int_identity _ =
   let int_id = Bind ("int_id", c_fun [("x", TInt)] (TInt, Var "x")) in
   let expr = Apply ("int_id", [Int 13]) in
   let rt = Runtime.create ~mod_name:"int_identity" [int_id] in
-  assert_equal (Int64.of_int 13) (Runtime.exec rt expr Ctypes.int64_t)
+  assert_equal (Int64.of_int 13) (Runtime.exec rt expr Ctypes.void Ctypes.int64_t ())
 
 let test_get_field _ =
   let get_x = Bind ( "get_x"
-                   , Fun { args = [("r", TRecord { members = [("x", TInt)]; row = Option.none })]
-                         ; body = (TInt, Get_field (Var "r", "x"))
+                   , Fun { args = [("r", TRecord { members = [("x", TInt)]; row = Some "r" })]
+                         ; body = (TInt, Get_field ("x", Var "r", TInt))
                 })
   in
-  let expr = Apply ("get_x", [Record [{ field_name = "x"; typ = TInt; v = Int 5 }]]) in
+  let expr = Apply ("get_x", [Record [ { field_name = "x"; typ = TInt; v = Int 5 }
+                                     ; { field_name = "y"; typ = TInt; v = Int 12 }
+               ]]) in
   let rt = Runtime.create [get_x] in
-  let res = Runtime.exec rt expr (Ctypes.int64_t) in
+  let res = Runtime.exec ~dump_module:false rt expr Ctypes.void Ctypes.int64_t () in
+  (* TODO:  send another record, check for correct specializations.  *)
   assert_equal (Int64.of_int 5) res ~printer:Int64.to_string  
   
 let suite =

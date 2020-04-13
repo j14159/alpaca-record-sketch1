@@ -15,8 +15,8 @@ let create
     m
   }
 
-let exec ?name:(name="th") ?dump_module:(dm = false) { m; cg } expr ctyp =
-  let ast = (Bind (name, Fun { args = []; body = (Code_gen.typ_of cg expr, expr) })) in
+let exec ?name:(name="th") ?dump_module:(dm = false) { m; cg } expr arg_t ret_t arg =
+  let ast = (Bind (name, Fun { args = []; body = (Code_gen.typ_of cg (Code_gen.new_env ()) expr, expr) })) in
   let thunk = Code_gen.bind_gen cg ast in
   (* TODO:  make this conditional on something in `t`:  *)
   if dm then dump_module m else ();
@@ -25,6 +25,6 @@ let exec ?name:(name="th") ?dump_module:(dm = false) { m; cg } expr ctyp =
   assert (not (PassManager.run_function thunk pm));
   let engine = Llvm_executionengine.create m in
   let open Ctypes in
-  let actual_ctype = Foreign.funptr (Ctypes.void @-> (returning ctyp)) in
+  let actual_ctype = Foreign.funptr (arg_t @-> (returning ret_t)) in
   let f = Llvm_executionengine.get_function_address name actual_ctype engine in
-  f ()
+  f arg

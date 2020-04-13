@@ -11,6 +11,8 @@ type t = { bindings : (string, Ast.expr) Hashtbl.t
          ; pm : [ `Function ] PassManager.t
          }
 
+type env = (string, (Ast.typ * llvalue)) Hashtbl.t
+
 let create
       ?context:(ctx = global_context ())
       ?m:(m = create_module ctx "a_module")
@@ -32,6 +34,9 @@ let create
     ; pm = PassManager.create_function m
   }
 
+(* This is a stop-gap from Runtime.exec, needs to be re-thought.  *)
+let new_env () = Hashtbl.create 10
+
 (* I think this pair of functions is poorly thought-out. *)
 let rec record_type_tag r =
   List.map (fun (field_name, typ) -> field_name ^ (string_of_typ typ)) r
@@ -50,6 +55,14 @@ let synth_fun_name name arg_types =
   in
   name ^ "_" ^ args_n
 
+(* When a function returns a record, the JIT'd version will actually expect a
+   final synthetic parameter which is a pointer to an already allocated record
+   (LLVM "structure").  This function names that parameter based on the bound
+   function's name.
+ *)
+let synth_rec_return_name fun_name =
+  "_" ^ fun_name ^ "_rec_return"
+  
 let rec create_type ({ llvm_context; _ } as deps) t =
   match t with
   | TRecord { members; _ } ->
@@ -77,7 +90,7 @@ let get_binding { bindings; _ } name =
 
    This needs a { t } so that it can look up module bindings.
 *)
-let typ_of deps = function
+let typ_of deps env = function
   | Record ms ->
      TRecord { members = (List.map
                             (fun { field_name; typ; _ } ->
@@ -96,14 +109,16 @@ let typ_of deps = function
        | Some (Fun { body = (typ, _); _ }) -> typ
        | _ -> failwith (name ^ "is not bound to a function.")
      end
+  | Var n ->
+     fst @@ Hashtbl.find env n
   | _ ->
      failwith "Can't find a type for this."
 
 let rec code_gen ({ builder; _ } as deps) env = function
   | Var n ->
-     Hashtbl.find env n
+     snd @@ Hashtbl.find env n
   | (Record fields) as r ->
-     let t = get_type deps (typ_of deps r) in
+     let t = get_type deps (typ_of deps env r) in
      let stack_rec = Llvm.build_alloca t "tmprecord" builder
      in
      let sorted_fields =
@@ -126,7 +141,23 @@ let rec code_gen ({ builder; _ } as deps) env = function
        ()
      in
      List.iteri f_iter sorted_fields;
-     build_load stack_rec "actual_rec" builder
+     stack_rec
+  | Get_field (f_name, r_exp, _f_typ) ->
+     begin
+       match typ_of deps env r_exp with
+       | (TRecord { members = ms; _ }) as typ_rec ->
+          let index = List.sort (fun a b -> String.compare (fst a) (fst b)) ms
+                      |> List.mapi (fun i (n, _) -> n, i)
+                      |> List.assoc f_name
+          in
+          let r_val = code_gen deps env r_exp in
+          dump_value r_val;
+          let _aa = build_alloca (get_type deps typ_rec) "tmp_record_for_compare" builder in
+          let ptr = build_struct_gep r_val index "ptr_rec_field" builder in
+          build_load ptr "tmp_rec_field" builder
+       | _ ->
+          failwith "Unacceptable record expression."
+     end
   | Int i ->
      const_of_int64 (get_type deps (TInt)) (Int64.of_int i) true
   | Apply (name, args) ->
@@ -140,7 +171,7 @@ let rec code_gen ({ builder; _ } as deps) env = function
    point.
 *)
 and gen_apply ({ m; builder; _ } as deps) env name args =
-  match List.map (fun a -> typ_of deps a) args
+  match List.map (fun a -> typ_of deps env a) args
         |> lookup_fun deps name
   with
   | Some fn ->
@@ -159,8 +190,6 @@ and gen_apply ({ m; builder; _ } as deps) env name args =
    applied to it, specialize the record arguments in [expr] so that they
    precisely match those in [arg_types].  All specialized record arguments must
    be closed at the end of this (no row variable).
-
-   TODO:  test this without leaking it.
  *)
 and specialize_proto expr arg_types =
   match expr with
@@ -210,7 +239,8 @@ and specialize_proto expr arg_types =
        Fun { args = List.map2 f args arg_types; body }
   | _ ->
      failwith "Can only specialize functions."
-(* Check to see if a monomorphized function has aleady been generated in the
+
+(* Check to see if a specialized function has aleady been generated in the
    LLVM module.
  *)
 and lookup_fun ({ m; bindings; llvm_context = c; _ } as deps) name arg_types =
@@ -248,28 +278,96 @@ and lookup_fun ({ m; bindings; llvm_context = c; _ } as deps) name arg_types =
   | Some _ ->
      Some n
 
+(* Generate a binding's function prototype in the LLVM module.  *)
+and gen_bind_proto ({m; llvm_context; _ } as deps) name { args; body = (ret_typ, _) } =
+  (* TODO:  add final param if this function returns a record.  *)
+  let ll_ret_typ = match ret_typ with
+    | TRecord _ -> void_type llvm_context
+    | _ -> get_type deps ret_typ
+  in
+
+  let args_arr = List.map (fun (_, t) ->
+                     let tt = get_type deps t in
+                     match t with
+                     | TRecord _ -> pointer_type tt
+                     | _ -> tt
+                   ) args
+                 |> Array.of_list
+  in
+  let ft = function_type ll_ret_typ args_arr in
+  declare_function name ft m
+
 (* Given an { Ast.bind }, generate LLVM IR for it in the module we're using for
    code generation.
+
+   Functions that return records are rewritten to accept an additional argument
+   from the caller, which is a pointer to an already-allocated structure in the
+   caller's control.  The rewritten function will use the llvm.memcpy intrinsic
+   to overwrite the struct from the caller as its last operation before
+   returning.
  *)
-and bind_gen ({ m = a_mod; builder = b; llvm_context = c; pm; _ } as deps) = function
-  | Bind (name, Fun { args; body = (ret_typ, expr) }) ->
-     let ll_ret_typ = get_type deps ret_typ in
-     let env = Hashtbl.create 10 in
-     let args_arr = List.map (fun (_, t) -> get_type deps t) args
-                    |> Array.of_list
+and bind_gen ({ m; builder = b; llvm_context = c; pm; _ } as deps) = function
+  | Bind (name, Fun ({ args; body = (ret_typ, expr) } as fr)) ->
+     let ret_rec = synth_rec_return_name name in
+     let args = match ret_typ with
+       | TRecord _ -> List.append args [(ret_rec, ret_typ)]
+       | _ -> args
      in
-     let ft = function_type ll_ret_typ args_arr in
-     let f = declare_function name ft a_mod in
+
+     let f = gen_bind_proto deps name { fr with args } in
+     let env = Hashtbl.create 10 in
      let name_arr = List.map (fun (n, _) -> n) args |> Array.of_list in
      Array.iter2 (fun n p ->
-         Hashtbl.add env n p;
+         Hashtbl.add env n (List.assoc n args, p);
          set_value_name n p
        ) name_arr (params f);
      let bb = append_block c "entry" f in
      position_at_end bb b;
      let body = code_gen deps env expr in
-     let _ = build_ret body b in
-     (* Llvm_analysis.assert_valid_function f; *)
+
+     let _ = begin
+         (* If the _original_ function in the AST returns a record, we rewrite
+            it to use the final (and synthetic) pointer to a struct that the
+            caller sent in order to receive the return value.
+          *)
+         match ret_typ with
+         | TRecord _ ->
+            (* This should maybe just always go into the module.
+               TODO:  move it?
+             *)
+            let memcpy_typ = function_type
+                               (void_type c)
+                               (Array.of_list
+                                  [ pointer_type (i8_type c)
+                                  ; pointer_type (i8_type c)
+                                  ; (i64_type c)
+                                  ; (i1_type c)
+                                  ]
+                               )
+            in
+            let memcpy = declare_function "llvm.memcpy.p0i8.p0i8.i64" memcpy_typ m in
+            let var = snd @@ Hashtbl.find env ret_rec in
+            (* llvm.memcpy needs to know how big our struct/record is:  *)
+            let size = size_of (get_type deps ret_typ) in
+            let size_i = build_ptrtoint size (i64_type c) "tmp_struct_size" b in
+            (* The llvm.memcpy intrinsic needs i8* arguments for source and
+               destination so bitcast apropriately:
+             *)
+            let bc_var = build_bitcast var (pointer_type (i8_type c)) "bc_var" b in
+            let bc_body = build_bitcast body (pointer_type (i8_type c)) "bc_body" b in
+            let memcpy_args = Array.of_list [ bc_var
+                                            ; bc_body
+                                            ; size_i
+                                            ; const_int (i1_type c) 0
+                                ]
+            in
+            let _call = build_call memcpy memcpy_args "" b in
+            build_ret_void b
+         | _ ->
+            build_ret body b
+       end
+     in
+     Llvm_analysis.assert_valid_function f;
      let _ = PassManager.run_function f pm in
      f
   | _ ->
@@ -295,7 +393,7 @@ let%test "Specializing matching records should pass" =
   (* Throwaway function body here, just checking specialization:  *)
   let f = c_fun [("r", c_rectyp [("x", TInt)] (Some "r"))] (TInt, Int 1) in
   let arg1 = Record [c_field "x" TInt (Int 1)] in
-  let t_arg1 = typ_of cg arg1 in
+  let t_arg1 = typ_of cg (Hashtbl.create 0) arg1 in
   let res = specialize_proto f [t_arg1] in
   let expected_typ = c_rectyp [("x", TInt)] None in
   match res with
@@ -310,7 +408,7 @@ let%test "Specializing to a wider record should grow the type" =
   (* Throwaway function body here, just checking specialization:  *)
   let f = c_fun [("r", c_rectyp [("x", TInt)] (Some "r"))] (TInt, Int 1) in
   let arg1 = Record [c_field "x" TInt (Int 1); c_field "y" TInt (Int 2)] in
-  let t_arg1 = typ_of cg arg1 in
+  let t_arg1 = typ_of cg (Hashtbl.create 0) arg1 in
   let res = specialize_proto f [t_arg1] in
   [%test_match? (Fun { args = [( "r"
                                , TRecord { members = [ ("x", TInt)
@@ -329,7 +427,7 @@ let%test "Trying to specialize to a smaller record should fail." =
     c_fun [("r", c_rectyp [("x", TInt); ("y", TInt)] (Some "r"))] (TInt, Int 1)
   in
   let arg1 = Record [c_field "x" TInt (Int 1)] in
-  let t_arg1 = typ_of cg arg1 in
+  let t_arg1 = typ_of cg (Hashtbl.create 0) arg1 in
   try let _ = specialize_proto f [t_arg1] in false with Record_too_small -> true
 
 let%test "Specializing a TInt -> TRecord -> TInt function only touches the record." =
@@ -343,8 +441,9 @@ let%test "Specializing a TInt -> TRecord -> TInt function only touches the recor
   in
   let arg1 = Int 1 in
   let arg2 = Record [c_field "x" TInt (Int 1); c_field "y" TInt (Int 2)] in
-  let t_arg1 = typ_of cg arg1 in
-  let t_arg2 = typ_of cg arg2 in
+  let env = Hashtbl.create 0 in
+  let t_arg1 = typ_of cg env arg1 in
+  let t_arg2 = typ_of cg env arg2 in
   let res = specialize_proto f [t_arg1; t_arg2] in
   [%test_match? Fun { args = [ ("a", TInt)
                              ; ("r", TRecord { members = [ ("x", TInt)

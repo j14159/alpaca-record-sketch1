@@ -13,7 +13,7 @@ let interp_get_field fields name =
 
 let interp_eval _env ast_node =
   match ast_node with
-  | Get_field (Record fields, name) ->
+  | Get_field (name, Record fields, _typ) ->
      interp_get_field fields name
   | _ ->
      failwith "Unsupported interpreter operation."

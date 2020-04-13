@@ -5,15 +5,16 @@ type expr = Record of record_member list
              variables can be properly reused.  This would also be a
              prerequisite for "ordinary" generics (System-F with prenex).
            *)
-          | Fun of { args : (string * typ) list
-                   ; body : (typ * expr)
-                   }
+          | Fun of fun_rec
           | Apply of string * (expr list)
-          | Get_field of expr * string
+          | Get_field of string * expr * typ
 and record_member = { field_name : string
                     ; typ : typ
                     ; v : expr
                     }
+and fun_rec = { args : (string * typ) list
+              ; body : (typ * expr)
+              }
 (* Allowing for replacement of row variable.  This is _much_ too
    over-simplified but it will work for this limited experiment.
  *)
