@@ -28,3 +28,5 @@ let exec ?name:(name="th") ?dump_module:(dm = false) { m; cg } expr arg_t ret_t 
   let actual_ctype = Foreign.funptr (arg_t @-> (returning ret_t)) in
   let f = Llvm_executionengine.get_function_address name actual_ctype engine in
   f arg
+
+let with_module { m; _ } f = f m

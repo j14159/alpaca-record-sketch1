@@ -10,3 +10,5 @@ val create : ?context : llcontext -> ?mod_name : string -> Ast.bind list -> t
    module.
  *)
 val exec : ?name : string -> ?dump_module : bool -> t -> Ast.expr -> 'a Ctypes.typ -> 'b Ctypes.typ -> 'a -> 'b
+
+val with_module : t -> (llmodule -> 'a) -> 'a
