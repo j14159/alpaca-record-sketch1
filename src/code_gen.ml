@@ -103,6 +103,8 @@ let typ_of deps env = function
      TFun
   | Int _ ->
      TInt
+  | Apply ("addi", _) ->
+     TInt
   | Apply (name, _) ->
      begin
        match get_binding deps name with
@@ -160,6 +162,8 @@ let rec code_gen ({ builder; _ } as deps) env = function
      end
   | Int i ->
      const_of_int64 (get_type deps (TInt)) (Int64.of_int i) true
+  | Apply ("addi", [arg1; arg2]) ->
+     build_add (code_gen deps env arg1) (code_gen deps env arg2) "tmp_add" builder
   | Apply (name, args) ->
      gen_apply deps env name args
   | _ ->

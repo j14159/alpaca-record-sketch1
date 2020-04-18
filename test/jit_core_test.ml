@@ -1,16 +1,7 @@
 open Jit
 open Jit.Ast
-open Jit.Interp
 
 open OUnit2
-
-let test_interp_get_field _ =
-  let record = Record [{ field_name = "x"
-                       ; typ = TInt
-                       ; v = Int 1}]
-  in
-  let res = interp_eval [] (Get_field ("x", record, TInt)) in
-  assert_equal (Int 1) res
 
 type jit_record
   
@@ -95,12 +86,17 @@ let test_get_field _ =
     fs
     ~printer:str_list_printer
 
+let test_add _ =
+  let rt = Runtime.create [] in
+  let res = Runtime.exec rt (Apply ("addi", [Int 1; Int 2])) Ctypes.void Ctypes.int64_t () in
+  assert_equal (Int64.of_int 3) res
+
 let suite =
   "Base tests to iterate with" >:::
-    [ "Intertpreter field get" >:: test_interp_get_field
-    ; "MCJIT create record/structure." >:: test_jit_record
+    [ "MCJIT create record/structure." >:: test_jit_record
     ; "MCJIT get a field with a JIT compiled function" >:: test_get_field
     ; "MCJIT execute an integer identity function" >:: test_int_identity
+    ; "MCJIT execute a basic integer addition" >:: test_add
     ]
    
 let _ =

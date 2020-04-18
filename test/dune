@@ -1,5 +1,5 @@
 (tests
- (names base_test)
+ (names jit_core_test compare_test interp_test)
  (libraries jit ounit2 llvm llvm.executionengine ctypes)
  (preprocess (pps ppx_deriving.show))
 )
