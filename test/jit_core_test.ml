@@ -54,7 +54,14 @@ let test_get_field _ =
   in
   let str_list_printer xs = List.fold_left (fun a b -> a ^ "; " ^ b) "" xs in
   assert_equal
-    ["llvm.stackprotector"; "get_x__record_xintyint"; "th"]
+    [ "llvm.stackprotector"
+    ; "get_x__record_xintyint"
+    ; "th"
+    (* Code_gen now adds this by default since we need it for many record
+       operations:
+     *)
+    ; "llvm.memcpy.p0i8.p0i8.i64"
+    ]
     fs
     ~printer:str_list_printer;
   (* Now run for a wider record again and check both result for correctness and
@@ -82,6 +89,7 @@ let test_get_field _ =
     ; "llvm.stackprotector"
     ; "get_x__record_xintyint"
     ; "th"
+    ; "llvm.memcpy.p0i8.p0i8.i64"
     ]
     fs
     ~printer:str_list_printer
@@ -91,12 +99,51 @@ let test_add _ =
   let res = Runtime.exec rt (Apply ("addi", [Int 1; Int 2])) Ctypes.void Ctypes.int64_t () in
   assert_equal (Int64.of_int 3) res
 
+let test_nested _ =
+  let rt = Runtime.create [] in
+  let nested_rec_type = c_rectyp [("x", TInt); ("y", TInt)] None in
+  let _rec_type = c_rectyp
+                   [ ("z", TInt)
+                   ; ("r1", nested_rec_type)
+                   ]
+                   None
+  in
+  let rec_v = Record
+                [ c_field "z" TInt (Int 1)
+                ; c_field "r1" nested_rec_type (Record [ c_field "x" TInt (Int 2)
+                                                       ; c_field "y" TInt (Int 3)])
+                ]
+  in
+  let p = Get_field ("x", (Get_field ("r1", rec_v, nested_rec_type)), TInt) in
+  let res = Runtime.exec ~name:"test_nested thunk" rt p Ctypes.void Ctypes.int64_t () in
+  assert_equal (Int64.of_int 2) res ~printer:Int64.to_string
+
+let test_double_record_field _ =
+  let get_x = Get_field ("an_int", Var "r", TInt) in
+  let arg_type = c_rectyp [("an_int", TInt)] (Some "row") in
+  let double = Bind ("double", c_fun
+                                 [c_arg "r" arg_type]
+                                 (TInt, (Apply ("addi", [get_x; get_x])))
+                 )
+  in
+  let rt = Runtime.create [double] in
+  let program1 = (Apply ("double", [Record [c_field "an_int" TInt (Int 12)]])) in
+  let res1 = Runtime.exec ~name:"run1" rt program1 Ctypes.void Ctypes.int64_t () in
+  let program2 = (Apply ("double", [Record [ c_field "zzz" TInt (Int 35)
+                                           ; c_field "an_int" TInt (Int 4)]]))
+  in
+  let res2 = Runtime.exec ~name:"run2" rt program2 Ctypes.void Ctypes.int64_t () in
+  assert_equal (Int64.of_int 24) res1 ~printer:Int64.to_string;
+  assert_equal (Int64.of_int 8) res2 ~printer:Int64.to_string
+
 let suite =
   "Base tests to iterate with" >:::
     [ "MCJIT create record/structure." >:: test_jit_record
     ; "MCJIT get a field with a JIT compiled function" >:: test_get_field
     ; "MCJIT execute an integer identity function" >:: test_int_identity
     ; "MCJIT execute a basic integer addition" >:: test_add
+    ; "MCJIT get a nested record's field" >:: test_nested
+    ; "MCJIT double a record's int field" >:: test_double_record_field
     ]
    
 let _ =

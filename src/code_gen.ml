@@ -9,6 +9,7 @@ type t = { bindings : (string, Ast.expr) Hashtbl.t
          ; builder : llbuilder
          ; m : llmodule
          ; pm : [ `Function ] PassManager.t
+         ; memcpy : llvalue
          }
 
 type env = (string, (Ast.typ * llvalue)) Hashtbl.t
@@ -26,12 +27,26 @@ let create
                      failwith "Only bind funs"
                  )
     bindings;
+  (* Define the memcpy intrinsic once for repeated use.  *)
+  let memcpy_typ = function_type
+                     (void_type ctx)
+                     (Array.of_list
+                        [ pointer_type (i8_type ctx)
+                        ; pointer_type (i8_type ctx)
+                        ; (i64_type ctx)
+                        ; (i1_type ctx)
+                        ]
+                     )
+  in
+  let memcpy = declare_function "llvm.memcpy.p0i8.p0i8.i64" memcpy_typ m in
+
   { type_dict = Hashtbl.create 10
     ; llvm_context = ctx
     ; builder = builder ctx
     ; bindings = bs
     ; m
     ; pm = PassManager.create_function m
+    ; memcpy
   }
 
 (* This is a stop-gap from Runtime.exec, needs to be re-thought.  *)
@@ -83,6 +98,27 @@ and get_type ({ type_dict; _ } as deps) ast_typ =
   | Some existing_type ->
      existing_type
 
+(** Abstracting calls to the memcpy intrinsic.
+
+    This gets used in several places for record handling.
+ *)
+let memcpy ({ memcpy = mc; builder = b; llvm_context = c; _ } as deps) typ dest src =
+  (* llvm.memcpy needs to know how big our struct/record is:  *)
+  let size = size_of (get_type deps typ) in
+  let size_i = build_ptrtoint size (i64_type c) "tmp_struct_size" b in
+  (* The llvm.memcpy intrinsic needs i8* arguments for source and
+     destination so bitcast apropriately:
+   *)
+  let bc_dest = build_bitcast dest (pointer_type (i8_type c)) "bc_dest" b in
+  let bc_src = build_bitcast src (pointer_type (i8_type c)) "bc_src" b in
+  let memcpy_args = Array.of_list [ bc_dest
+                                  ; bc_src
+                                  ; size_i
+                                  ; const_int (i1_type c) 0
+                      ]
+  in
+  build_call mc memcpy_args "" b
+
 let get_binding { bindings; _ } name =
   Hashtbl.find_opt bindings name
 
@@ -113,16 +149,22 @@ let typ_of deps env = function
      end
   | Var n ->
      fst @@ Hashtbl.find env n
-  | _ ->
-     failwith "Can't find a type for this."
+  | Get_field (_, _, t) ->
+     t
 
-let rec code_gen ({ builder; _ } as deps) env = function
+(** Debugging helper to wrap LLVM instruction creation with STDIO dumps and
+    newlines.
+ *)
+let _dump e =
+  dump_value e;
+  print_endline "";
+  e
+
+let rec code_gen ?no_pointer:(no_ptr = false) ({ builder; _ } as deps) env = function
   | Var n ->
      snd @@ Hashtbl.find env n
-  | (Record fields) as r ->
-     let t = get_type deps (typ_of deps env r) in
-     let stack_rec = Llvm.build_alloca t "tmprecord" builder
-     in
+  (* TODO:  this ignores `no_pointer` and maybe shouldn't.  *)
+  | Record fields ->
      let sorted_fields =
        List.sort
          (fun { field_name = f1; _ }
@@ -130,40 +172,61 @@ let rec code_gen ({ builder; _ } as deps) env = function
           -> String.compare f1 f2)
          fields
      in
-     let f_iter idx { v; _ } =
+
+     (* We use lexicographic ordering of a record's fields to figure out LLVM
+        struct indices so let's make sure the fields are ordered correctly both
+        for type detection and for index generation.
+      *)
+     let r = Record sorted_fields in
+     let t = get_type deps (typ_of deps env r) in
+     let stack_rec = Llvm.build_alloca t "tmprecord" builder
+     in
+
+     let f_iter idx { v; typ; _ } =
        let llv = code_gen deps env v in
-       let ptr =
-         Llvm.build_struct_gep
-           stack_rec
-           idx
-           ("struct_ptr" ^ (string_of_int idx))
-           builder
+       let ptr = Llvm.build_struct_gep
+                   stack_rec
+                   idx
+                   ("struct_ptr" ^ (string_of_int idx))
+                   builder
        in
-       let _ = Llvm.build_store llv ptr builder in
+       (* Nested records need to be memcpy'd into the alloca'd structure, while
+          other values need to be stored:
+        *)
+       let _st =
+         match typ with
+         | TRecord _ -> memcpy deps typ ptr llv
+         | _         -> Llvm.build_store llv ptr builder
+       in
        ()
      in
      List.iteri f_iter sorted_fields;
      stack_rec
-  | Get_field (f_name, r_exp, _f_typ) ->
+  | Get_field (f_name, r_exp, _) ->
      begin
        match typ_of deps env r_exp with
-       | (TRecord { members = ms; _ }) as typ_rec ->
+       | TRecord { members = ms; _ } ->
           let index = List.sort (fun a b -> String.compare (fst a) (fst b)) ms
                       |> List.mapi (fun i (n, _) -> n, i)
                       |> List.assoc f_name
           in
           let r_val = code_gen deps env r_exp in
-          dump_value r_val;
-          let _aa = build_alloca (get_type deps typ_rec) "tmp_record_for_compare" builder in
           let ptr = build_struct_gep r_val index "ptr_rec_field" builder in
-          build_load ptr "tmp_rec_field" builder
+          if no_ptr then
+            build_load ptr "tmp_rec_field" builder
+          else
+            ptr
        | _ ->
           failwith "Unacceptable record expression."
      end
   | Int i ->
      const_of_int64 (get_type deps (TInt)) (Int64.of_int i) true
   | Apply ("addi", [arg1; arg2]) ->
-     build_add (code_gen deps env arg1) (code_gen deps env arg2) "tmp_add" builder
+     build_add
+       (code_gen ~no_pointer:true deps env arg1)
+       (code_gen ~no_pointer:true deps env arg2)
+       "tmp_add"
+       builder
   | Apply (name, args) ->
      gen_apply deps env name args
   | _ ->
@@ -310,7 +373,7 @@ and gen_bind_proto ({m; llvm_context; _ } as deps) name { args; body = (ret_typ,
    to overwrite the struct from the caller as its last operation before
    returning.
  *)
-and bind_gen ({ m; builder = b; llvm_context = c; pm; _ } as deps) = function
+and bind_gen ({ builder = b; llvm_context = c; pm; _ } as deps) = function
   | Bind (name, Fun ({ args; body = (ret_typ, expr) } as fr)) ->
      let ret_rec = synth_rec_return_name name in
      let args = match ret_typ with
@@ -327,7 +390,7 @@ and bind_gen ({ m; builder = b; llvm_context = c; pm; _ } as deps) = function
        ) name_arr (params f);
      let bb = append_block c "entry" f in
      position_at_end bb b;
-     let body = code_gen deps env expr in
+     let body = code_gen ~no_pointer:true deps env expr in
 
      let _ = begin
          (* If the _original_ function in the AST returns a record, we rewrite
@@ -336,36 +399,8 @@ and bind_gen ({ m; builder = b; llvm_context = c; pm; _ } as deps) = function
           *)
          match ret_typ with
          | TRecord _ ->
-            (* This should maybe just always go into the module.
-               TODO:  move it?
-             *)
-            let memcpy_typ = function_type
-                               (void_type c)
-                               (Array.of_list
-                                  [ pointer_type (i8_type c)
-                                  ; pointer_type (i8_type c)
-                                  ; (i64_type c)
-                                  ; (i1_type c)
-                                  ]
-                               )
-            in
-            let memcpy = declare_function "llvm.memcpy.p0i8.p0i8.i64" memcpy_typ m in
             let var = snd @@ Hashtbl.find env ret_rec in
-            (* llvm.memcpy needs to know how big our struct/record is:  *)
-            let size = size_of (get_type deps ret_typ) in
-            let size_i = build_ptrtoint size (i64_type c) "tmp_struct_size" b in
-            (* The llvm.memcpy intrinsic needs i8* arguments for source and
-               destination so bitcast apropriately:
-             *)
-            let bc_var = build_bitcast var (pointer_type (i8_type c)) "bc_var" b in
-            let bc_body = build_bitcast body (pointer_type (i8_type c)) "bc_body" b in
-            let memcpy_args = Array.of_list [ bc_var
-                                            ; bc_body
-                                            ; size_i
-                                            ; const_int (i1_type c) 0
-                                ]
-            in
-            let _call = build_call memcpy memcpy_args "" b in
+            let _ = memcpy deps ret_typ var body in
             build_ret_void b
          | _ ->
             build_ret body b

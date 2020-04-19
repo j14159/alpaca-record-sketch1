@@ -17,8 +17,20 @@ val new_env : unit -> env
  *)
 val get_type : t -> Ast.typ -> lltype
 
-(* Generate LLVM IR for the provided [Ast.expr].  *)
-val code_gen : t -> env -> Ast.expr -> llvalue
+(** Generate LLVM IR for the provided [Ast.expr].
+    
+    The [no_pointer] option should be [true] if the code generator should not
+    return a pointer to the result.  This is important for record operations
+    like {! Ast.Get_field }.  Getting a field from a record (LLVM struct)
+    results in a pointer to the item.  This is good if a record is being
+    returned, but bad if the return is being passed to something like integer
+    addition.
+
+    This is a bit of a kludge atm and should be re-thought.
+
+    More broadly, TODO:  rethink (actually think about?) the memory model.
+ *)
+val code_gen : ?no_pointer : bool -> t -> env -> Ast.expr -> llvalue
 
 val bind_gen : t -> Ast.bind -> llvalue
 
