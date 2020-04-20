@@ -126,13 +126,19 @@ let get_binding { bindings; _ } name =
 
    This needs a { t } so that it can look up module bindings.
 *)
-let typ_of deps env = function
+let rec typ_of deps env = function
   | Record ms ->
+     let sorted_ms = List.sort
+       (fun { field_name = f1; _ } { field_name = f2; _ } ->
+         String.compare f1 f2
+       )
+       ms
+     in
      TRecord { members = (List.map
-                            (fun { field_name; typ; _ } ->
-                              (field_name, typ)
+                            (fun { field_name; v; _ } ->
+                              (field_name, typ_of deps env v)
                             )
-                            ms)
+                            sorted_ms)
              ; row = Option.none
        }
   | Fun _ ->
@@ -148,7 +154,11 @@ let typ_of deps env = function
        | _ -> failwith (name ^ "is not bound to a function.")
      end
   | Var n ->
-     fst @@ Hashtbl.find env n
+     begin
+       match Hashtbl.find_opt env n with
+       | Some (expr, _) -> expr
+       | _ -> failwith ("Variable " ^ n ^ " is not in the environment for typ_of.")
+     end
   | Get_field (_, _, t) ->
      t
 
@@ -162,7 +172,11 @@ let _dump e =
 
 let rec code_gen ?no_pointer:(no_ptr = false) ({ builder; _ } as deps) env = function
   | Var n ->
-     snd @@ Hashtbl.find env n
+     begin
+       match Hashtbl.find_opt env n with
+       | Some (_, v) -> v
+       | _ -> failwith ("Variable " ^ n ^ " is not in env for code_gen.")
+     end
   (* TODO:  this ignores `no_pointer` and maybe shouldn't.  *)
   | Record fields ->
      let sorted_fields =
@@ -205,7 +219,7 @@ let rec code_gen ?no_pointer:(no_ptr = false) ({ builder; _ } as deps) env = fun
   | Get_field (f_name, r_exp, _) ->
      begin
        match typ_of deps env r_exp with
-       | TRecord { members = ms; _ } ->
+       | (TRecord { members = ms; _ }) as _t ->
           let index = List.sort (fun a b -> String.compare (fst a) (fst b)) ms
                       |> List.mapi (fun i (n, _) -> n, i)
                       |> List.assoc f_name
@@ -295,8 +309,14 @@ and specialize_proto expr arg_types =
             if List.length m2 > 0 && Option.is_none row then
               failwith ("Record argument " ^ n ^ " is not open (no row variable).")
             else
-              (* Composite record:  *)
-              (n, TRecord { members = List.append m1 m2; row = None })
+              (* Composite record, make sure the fields are ordered correctly
+                 for later typing/signature generation:
+               *)
+              let new_mems = List.sort
+                               (fun (a, _) (b, _) -> String.compare a b)
+                               (List.append m1 m2)
+              in
+              (n, TRecord { members = new_mems; row = None })
 
          | a, b when a = b ->
             (n, a)
@@ -312,7 +332,6 @@ and specialize_proto expr arg_types =
  *)
 and lookup_fun ({ m; bindings; llvm_context = c; _ } as deps) name arg_types =
   let n = synth_fun_name name arg_types in
-
   let lookup_binding _ =
     match Hashtbl.find_opt bindings name with
     | None -> failwith (name ^ " is not bound")

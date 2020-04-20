@@ -8,13 +8,16 @@ type expr = Record of record_member list
           | Fun of fun_rec
           | Apply of string * (expr list)
           | Get_field of string * expr * typ
+                                           [@@deriving show]
 and record_member = { field_name : string
                     ; typ : typ
                     ; v : expr
                     }
+                      [@@deriving show]
 and fun_rec = { args : (string * typ) list
               ; body : (typ * expr)
               }
+                [@@deriving show]
 (* Allowing for replacement of row variable.  This is _much_ too
    over-simplified but it will work for this limited experiment.
  *)
@@ -23,10 +26,10 @@ and typ = TRecord of { members : (string * typ) list
                      }
         | TInt
         | TFun
-
+[@@deriving show]
 (* Intending only function support for now.  *)
 type bind = Bind of string * expr
-
+                               [@@deriving show]
 let c_field field_name typ v = { field_name; typ; v }
 let c_rectyp members row = TRecord { members; row }
 let c_fun args body = Fun { args; body }

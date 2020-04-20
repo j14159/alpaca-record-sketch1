@@ -2,5 +2,5 @@
  (name jit)
  (libraries llvm llvm.executionengine llvm.analysis)
  (inline_tests)
- (preprocess (pps ppx_inline_test ppx_test_match))
+ (preprocess (pps ppx_inline_test ppx_test_match ppx_deriving.show))
 )

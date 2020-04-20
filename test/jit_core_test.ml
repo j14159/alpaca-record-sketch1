@@ -136,14 +136,68 @@ let test_double_record_field _ =
   assert_equal (Int64.of_int 24) res1 ~printer:Int64.to_string;
   assert_equal (Int64.of_int 8) res2 ~printer:Int64.to_string
 
+(* Make sure using the result of a function application to fill in a record's
+   fields will work.
+ *)
+let test_record_construction_with_apply _ =
+  failwith "No implementation."
+
+(* Make sure nested polymorphic records are also compiled correctly.  *)
+let test_nested_polymorphic_records _ =
+  let internal_rec_type = c_rectyp [("abc", TInt)] (Some "inner_row") in
+  let outer_rec_type = c_rectyp [("internal_rec", internal_rec_type)] (Some "outer_row") in
+  let get_abc_body = ( TInt
+                     , Get_field ( "abc"
+                                 , (Get_field ("internal_rec", Var "r", internal_rec_type))
+                                 , TInt)
+                     )
+  in
+  let get_abc_args = [("r", outer_rec_type)] in
+  let get_abc = Bind ("get_abc", c_fun get_abc_args get_abc_body) in
+  (* TODO:  test actual results.  *)
+  let rt = Runtime.create [get_abc] in
+
+  let program1_irt = c_rectyp [("x", TInt); ("abc", TInt)] None in
+  let program1_ir = Record
+                      [ c_field "x" TInt (Int 3)
+                      ; c_field "abc" TInt (Int 47)
+                      ]
+  in
+  let program1 = Apply ("get_abc", [Record [c_field "internal_rec" program1_irt program1_ir]]) in
+
+
+  let program2_irt = c_rectyp [("x", TInt); ("abc", TInt); ("_1", TInt)] None in
+  let program2_ir = Record
+                      [ c_field "x" TInt (Int 333)
+                      ; c_field "abc" TInt (Int (-5))
+                      ; c_field "_1" TInt (Int 0)
+                      ]
+  in
+  let program2 = Apply
+                   ("get_abc", [Record
+                                      [ c_field "internal_rec" program2_irt program2_ir
+                                      ; c_field "don't use" TInt (Int 512)
+                                      ]
+                               ]
+                   )
+  in
+
+  let res1 = Runtime.exec ~name:"run1" rt program1 Ctypes.void Ctypes.int64_t () in
+  let res2 = Runtime.exec ~name:"run2" rt program2 Ctypes.void Ctypes.int64_t () in
+  (* TODO:  test presence of compiled methods.  *)
+  assert_equal (Int64.of_int 47) res1 ~printer:Int64.to_string;
+  assert_equal (Int64.of_int (-5)) res2 ~printer:Int64.to_string
+
 let suite =
-  "Base tests to iterate with" >:::
-    [ "MCJIT create record/structure." >:: test_jit_record
-    ; "MCJIT get a field with a JIT compiled function" >:: test_get_field
-    ; "MCJIT execute an integer identity function" >:: test_int_identity
-    ; "MCJIT execute a basic integer addition" >:: test_add
-    ; "MCJIT get a nested record's field" >:: test_nested
-    ; "MCJIT double a record's int field" >:: test_double_record_field
+  "MCJIT code generation tests" >:::
+    [ "Create record/structure." >:: test_jit_record
+    ; "Get a field with a JIT compiled function" >:: test_get_field
+    ; "Execute an integer identity function" >:: test_int_identity
+    ; "Execute a basic integer addition" >:: test_add
+    ; "Get a nested record's field" >:: test_nested
+    ; "Double a flat record's int field" >:: test_double_record_field
+    ; "Construct a record calling a function for a field" >:: test_record_construction_with_apply
+    ; "Nested polymorphic records" >:: test_nested_polymorphic_records
     ]
    
 let _ =
