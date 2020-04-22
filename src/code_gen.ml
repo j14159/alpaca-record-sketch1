@@ -12,7 +12,42 @@ type t = { bindings : (string, Ast.expr) Hashtbl.t
          ; memcpy : llvalue
          }
 
-type env = (string, (Ast.typ * llvalue)) Hashtbl.t
+(** In order to capture full row types seen at run-time, we need to introduce
+    type variables for their rows and populate them in the environment.  This is
+    to support accurate signature capture and thus structure layout.
+ *)
+module Env : sig
+  type t
+  exception Undefined_var of string
+
+  val create : unit -> t
+
+  val add_var : t -> string -> Ast.typ -> llvalue -> unit
+  val get_var : t -> string -> (Ast.typ * llvalue)
+end = struct
+  exception Undefined_var of string
+  (* Variables and type variables.  Not thinking about types as first-class yet,
+     though there may be advantages to that later.  Probably deferring that to a
+     future experiment/sketch.
+   *)
+  type t = { vars : (string, (Ast.typ * llvalue)) Hashtbl.t
+           ; type_vars : (string, Ast.typ) Hashtbl.t
+           }
+
+  let create () = { vars = Hashtbl.create 10
+                  ; type_vars = Hashtbl.create 10
+                  }
+
+  let add_var t name typ llv =
+    Hashtbl.add t.vars name (typ, llv)
+
+  let get_var t name =
+    match Hashtbl.find_opt t.vars name with
+    | Some res -> res
+    | None -> raise (Undefined_var name)
+end
+
+type env = Env.t
 
 let create
       ?context:(ctx = global_context ())
@@ -50,7 +85,7 @@ let create
   }
 
 (* This is a stop-gap from Runtime.exec, needs to be re-thought.  *)
-let new_env () = Hashtbl.create 10
+let new_env () = Env.create ()
 
 (* I think this pair of functions is poorly thought-out. *)
 let rec record_type_tag r =
@@ -154,11 +189,8 @@ let rec typ_of deps env = function
        | _ -> failwith (name ^ "is not bound to a function.")
      end
   | Var n ->
-     begin
-       match Hashtbl.find_opt env n with
-       | Some (expr, _) -> expr
-       | _ -> failwith ("Variable " ^ n ^ " is not in the environment for typ_of.")
-     end
+     let (expr, _) = Env.get_var env n in
+     expr
   | Get_field (_, _, t) ->
      t
 
@@ -172,11 +204,7 @@ let _dump e =
 
 let rec code_gen ?no_pointer:(no_ptr = false) ({ builder; _ } as deps) env = function
   | Var n ->
-     begin
-       match Hashtbl.find_opt env n with
-       | Some (_, v) -> v
-       | _ -> failwith ("Variable " ^ n ^ " is not in env for code_gen.")
-     end
+     snd @@ Env.get_var env n
   (* TODO:  this ignores `no_pointer` and maybe shouldn't.  *)
   | Record fields ->
      let sorted_fields =
@@ -401,10 +429,10 @@ and bind_gen ({ builder = b; llvm_context = c; pm; _ } as deps) = function
      in
 
      let f = gen_bind_proto deps name { fr with args } in
-     let env = Hashtbl.create 10 in
+     let env = Env.create () in
      let name_arr = List.map (fun (n, _) -> n) args |> Array.of_list in
      Array.iter2 (fun n p ->
-         Hashtbl.add env n (List.assoc n args, p);
+         Env.add_var env n (List.assoc n args) p;
          set_value_name n p
        ) name_arr (params f);
      let bb = append_block c "entry" f in
@@ -418,7 +446,7 @@ and bind_gen ({ builder = b; llvm_context = c; pm; _ } as deps) = function
           *)
          match ret_typ with
          | TRecord _ ->
-            let var = snd @@ Hashtbl.find env ret_rec in
+            let var = snd @@ Env.get_var env ret_rec in
             let _ = memcpy deps ret_typ var body in
             build_ret_void b
          | _ ->
@@ -451,7 +479,7 @@ let%test "Specializing matching records should pass" =
   (* Throwaway function body here, just checking specialization:  *)
   let f = c_fun [("r", c_rectyp [("x", TInt)] (Some "r"))] (TInt, Int 1) in
   let arg1 = Record [c_field "x" TInt (Int 1)] in
-  let t_arg1 = typ_of cg (Hashtbl.create 0) arg1 in
+  let t_arg1 = typ_of cg (Env.create ()) arg1 in
   let res = specialize_proto f [t_arg1] in
   let expected_typ = c_rectyp [("x", TInt)] None in
   match res with
@@ -466,7 +494,7 @@ let%test "Specializing to a wider record should grow the type" =
   (* Throwaway function body here, just checking specialization:  *)
   let f = c_fun [("r", c_rectyp [("x", TInt)] (Some "r"))] (TInt, Int 1) in
   let arg1 = Record [c_field "x" TInt (Int 1); c_field "y" TInt (Int 2)] in
-  let t_arg1 = typ_of cg (Hashtbl.create 0) arg1 in
+  let t_arg1 = typ_of cg (Env.create ()) arg1 in
   let res = specialize_proto f [t_arg1] in
   [%test_match? (Fun { args = [( "r"
                                , TRecord { members = [ ("x", TInt)
@@ -485,7 +513,7 @@ let%test "Trying to specialize to a smaller record should fail." =
     c_fun [("r", c_rectyp [("x", TInt); ("y", TInt)] (Some "r"))] (TInt, Int 1)
   in
   let arg1 = Record [c_field "x" TInt (Int 1)] in
-  let t_arg1 = typ_of cg (Hashtbl.create 0) arg1 in
+  let t_arg1 = typ_of cg (Env.create ()) arg1 in
   try let _ = specialize_proto f [t_arg1] in false with Record_too_small -> true
 
 let%test "Specializing a TInt -> TRecord -> TInt function only touches the record." =
@@ -499,7 +527,7 @@ let%test "Specializing a TInt -> TRecord -> TInt function only touches the recor
   in
   let arg1 = Int 1 in
   let arg2 = Record [c_field "x" TInt (Int 1); c_field "y" TInt (Int 2)] in
-  let env = Hashtbl.create 0 in
+  let env = Env.create () in
   let t_arg1 = typ_of cg env arg1 in
   let t_arg2 = typ_of cg env arg2 in
   let res = specialize_proto f [t_arg1; t_arg2] in
