@@ -140,7 +140,23 @@ let test_double_record_field _ =
    fields will work.
  *)
 let test_record_construction_with_apply _ =
-  failwith "No implementation."
+  let double = Bind ("double", Fun { args = [("x", TInt)]
+                                   ; body = (TInt, Apply ("addi", [Var "x"; Var "x"]))
+                 })
+  in
+  let rt = Runtime.create [double] in
+  let r = Record
+            [ { field_name = "x"; typ = TInt; v = Int 1 }
+            ; { field_name = "z"; typ = TInt; v = Apply ("addi", [Int 12; Int 12]) }
+            ; { field_name = "y"; typ = TInt; v = Apply ("double", [Int 2]) }
+            ]
+  in
+  let program1 = Get_field ( "z", r, TInt) in
+  let program2 = Get_field ("y", r, TInt) in
+  let res1 = Runtime.exec ~name:"p1" rt program1 Ctypes.void Ctypes.int64_t () in
+  let res2 = Runtime.exec ~name:"p2" rt program2 Ctypes.void Ctypes.int64_t () in
+  assert_equal (Int64.of_int 24) res1 ~printer:Int64.to_string;
+  assert_equal (Int64.of_int 4) res2 ~printer:Int64.to_string
 
 (* Make sure nested polymorphic records are also compiled correctly.  *)
 let test_nested_polymorphic_records _ =
