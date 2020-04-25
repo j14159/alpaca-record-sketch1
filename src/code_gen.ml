@@ -22,29 +22,45 @@ module Env : sig
 
   val create : unit -> t
 
+  val of_args : (string * Ast.typ) list -> t
+
   val add_var : t -> string -> Ast.typ -> llvalue -> unit
-  val get_var : t -> string -> (Ast.typ * llvalue)
+  val get_var_type : t -> string -> Ast.typ
+  val get_ll_var : t -> string -> llvalue
 end = struct
   exception Undefined_var of string
+
   (* Variables and type variables.  Not thinking about types as first-class yet,
      though there may be advantages to that later.  Probably deferring that to a
      future experiment/sketch.
    *)
-  type t = { vars : (string, (Ast.typ * llvalue)) Hashtbl.t
-           ; type_vars : (string, Ast.typ) Hashtbl.t
+  type t = { var_types : (string, Ast.typ) Hashtbl.t
+           ; ll_vars : (string, llvalue) Hashtbl.t
            }
 
-  let create () = { vars = Hashtbl.create 10
-                  ; type_vars = Hashtbl.create 10
+  let create () = { var_types = Hashtbl.create 10
+                  ; ll_vars = Hashtbl.create 10
                   }
 
   let add_var t name typ llv =
-    Hashtbl.add t.vars name (typ, llv)
+    Hashtbl.add t.var_types name typ;
+    Hashtbl.add t.ll_vars name llv
 
-  let get_var t name =
-    match Hashtbl.find_opt t.vars name with
+  let of_args args =
+    let env = create () in
+    List.iter (fun (n, t) -> Hashtbl.add env.var_types n t) args;
+    env
+
+  let get_var_type t name =
+    match Hashtbl.find_opt t.var_types name with
     | Some res -> res
     | None -> raise (Undefined_var name)
+
+  let get_ll_var t name =
+    match Hashtbl.find_opt t.ll_vars name with
+    | Some res -> res
+    | None -> raise (Undefined_var name)
+
 end
 
 type env = Env.t
@@ -189,10 +205,13 @@ let rec typ_of deps env = function
        | _ -> failwith (name ^ "is not bound to a function.")
      end
   | Var n ->
-     let (expr, _) = Env.get_var env n in
-     expr
-  | Get_field (_, _, t) ->
-     t
+     Env.get_var_type env n
+  | Get_field (name, expr, _) ->
+     match typ_of deps env expr with
+     | TRecord { members; _ } ->
+        List.assoc name members
+     | _ ->
+        failwith ("Tried to get field " ^ name ^ " from a non-record.")
 
 (** Debugging helper to wrap LLVM instruction creation with STDIO dumps and
     newlines.
@@ -204,7 +223,7 @@ let _dump e =
 
 let rec code_gen ?no_pointer:(no_ptr = false) ({ builder; _ } as deps) env = function
   | Var n ->
-     snd @@ Env.get_var env n
+     Env.get_ll_var env n
   (* TODO:  this ignores `no_pointer` and maybe shouldn't.  *)
   | Record fields ->
      let sorted_fields =
@@ -294,13 +313,26 @@ and gen_apply ({ m; builder; _ } as deps) env name args =
   | None ->
      failwith ("Unable to find function for " ^ name)
 
+(* Specialize an expression, generally a function body.  The supplied
+   environment needs to be populated with all available variables,
+   including expanded rows.
+
+   TODO:  smells like maybe a form of partial evaluation?
+ *)
+and specialize deps env expr =
+  match expr with
+  | Get_field (name, src, _) ->
+     let t = typ_of deps env (specialize deps env src) in
+     Get_field (name, src, t)
+  | _ ->
+     expr
 
 (* Given a function in [expr] and a list of argument types that are going to be
    applied to it, specialize the record arguments in [expr] so that they
    precisely match those in [arg_types].  All specialized record arguments must
    be closed at the end of this (no row variable).
  *)
-and specialize_proto expr arg_types =
+and specialize_proto deps expr arg_types =
   match expr with
   | Fun { args; body } ->
      if List.length args != List.length arg_types then
@@ -351,7 +383,11 @@ and specialize_proto expr arg_types =
          | _, _ ->
             failwith "Function and argument types do not match."
        in
-       Fun { args = List.map2 f args arg_types; body }
+       let args2 = List.map2 f args arg_types in
+       let env = Env.of_args args2 in
+       let (_, body) = body in
+       let body2 = specialize deps env body in
+       Fun { args = args2; body = (typ_of deps env body2, body2)}
   | _ ->
      failwith "Can only specialize functions."
 
@@ -369,7 +405,7 @@ and lookup_fun ({ m; bindings; llvm_context = c; _ } as deps) name arg_types =
   match lookup_function n m with
   | None ->
      let expr = lookup_binding () in
-     let specialized = specialize_proto expr arg_types in
+     let specialized = specialize_proto deps expr arg_types in
      (* Creating a new builder here may be *very* wasteful, not sure yet.
         The basic problem is nested generation of functions.  Builders seem to
         side-effect (internal state I guess, TBD) and when there are functions
@@ -422,6 +458,7 @@ and gen_bind_proto ({m; llvm_context; _ } as deps) name { args; body = (ret_typ,
  *)
 and bind_gen ({ builder = b; llvm_context = c; pm; _ } as deps) = function
   | Bind (name, Fun ({ args; body = (ret_typ, expr) } as fr)) ->
+     let env = Env.create () in
      let ret_rec = synth_rec_return_name name in
      let args = match ret_typ with
        | TRecord _ -> List.append args [(ret_rec, ret_typ)]
@@ -429,7 +466,6 @@ and bind_gen ({ builder = b; llvm_context = c; pm; _ } as deps) = function
      in
 
      let f = gen_bind_proto deps name { fr with args } in
-     let env = Env.create () in
      let name_arr = List.map (fun (n, _) -> n) args |> Array.of_list in
      Array.iter2 (fun n p ->
          Env.add_var env n (List.assoc n args) p;
@@ -446,7 +482,7 @@ and bind_gen ({ builder = b; llvm_context = c; pm; _ } as deps) = function
           *)
          match ret_typ with
          | TRecord _ ->
-            let var = snd @@ Env.get_var env ret_rec in
+            let var = Env.get_ll_var env ret_rec in
             let _ = memcpy deps ret_typ var body in
             build_ret_void b
          | _ ->
@@ -467,8 +503,9 @@ let with_mod { m; _ } f = f m
    Inline because I didn't want to expose specialize_proto from this module.
  *)
 let%test "Specializing to wrong types should fail" =
+  let deps = create [] in
   try
-    let _ = specialize_proto (c_fun [c_arg "x" TInt] (TInt, Var "x")) [TFun] in
+    let _ = specialize_proto deps (c_fun [c_arg "x" TInt] (TInt, Var "x")) [TFun] in
     false
   with
     Failure _ -> true
@@ -480,7 +517,7 @@ let%test "Specializing matching records should pass" =
   let f = c_fun [("r", c_rectyp [("x", TInt)] (Some "r"))] (TInt, Int 1) in
   let arg1 = Record [c_field "x" TInt (Int 1)] in
   let t_arg1 = typ_of cg (Env.create ()) arg1 in
-  let res = specialize_proto f [t_arg1] in
+  let res = specialize_proto cg f [t_arg1] in
   let expected_typ = c_rectyp [("x", TInt)] None in
   match res with
   | Fun { args = [(_, res_arg1)]; _ } ->
@@ -495,7 +532,7 @@ let%test "Specializing to a wider record should grow the type" =
   let f = c_fun [("r", c_rectyp [("x", TInt)] (Some "r"))] (TInt, Int 1) in
   let arg1 = Record [c_field "x" TInt (Int 1); c_field "y" TInt (Int 2)] in
   let t_arg1 = typ_of cg (Env.create ()) arg1 in
-  let res = specialize_proto f [t_arg1] in
+  let res = specialize_proto cg f [t_arg1] in
   [%test_match? (Fun { args = [( "r"
                                , TRecord { members = [ ("x", TInt)
                                                      ; ("y", TInt)
@@ -514,7 +551,7 @@ let%test "Trying to specialize to a smaller record should fail." =
   in
   let arg1 = Record [c_field "x" TInt (Int 1)] in
   let t_arg1 = typ_of cg (Env.create ()) arg1 in
-  try let _ = specialize_proto f [t_arg1] in false with Record_too_small -> true
+  try let _ = specialize_proto cg f [t_arg1] in false with Record_too_small -> true
 
 let%test "Specializing a TInt -> TRecord -> TInt function only touches the record." =
   (* Need this to get the type of arg1 later:  *)
@@ -530,7 +567,7 @@ let%test "Specializing a TInt -> TRecord -> TInt function only touches the recor
   let env = Env.create () in
   let t_arg1 = typ_of cg env arg1 in
   let t_arg2 = typ_of cg env arg2 in
-  let res = specialize_proto f [t_arg1; t_arg2] in
+  let res = specialize_proto cg f [t_arg1; t_arg2] in
   [%test_match? Fun { args = [ ("a", TInt)
                              ; ("r", TRecord { members = [ ("x", TInt)
                                                          ; ("y", TInt)
