@@ -12,9 +12,10 @@ type t = { bindings : (string, Ast.expr) Hashtbl.t
          ; memcpy : llvalue
          }
 
-(** In order to capture full row types seen at run-time, we need to introduce
-    type variables for their rows and populate them in the environment.  This is
-    to support accurate signature capture and thus structure layout.
+(** Abstracting environments to keep variables, their types, and associated llvm
+    constructions available and relatively easy to access.  This is heavy on
+    side-effects right now and would probably benefit from being more
+    functor- or monad-based.
  *)
 module Env : sig
   type t
@@ -30,9 +31,8 @@ module Env : sig
 end = struct
   exception Undefined_var of string
 
-  (* Variables and type variables.  Not thinking about types as first-class yet,
-     though there may be advantages to that later.  Probably deferring that to a
-     future experiment/sketch.
+  (* Separating the actual types from LLVM-built variables since rewrites
+     (specialization) don't need the latter.
    *)
   type t = { var_types : (string, Ast.typ) Hashtbl.t
            ; ll_vars : (string, llvalue) Hashtbl.t
@@ -113,7 +113,8 @@ and string_of_typ = function
   | TFun -> "fun"
   | TInt -> "int"
 
-(* Make a synthetic function name that encodes the monomorphization of records.
+(* Make a synthetic function name that encodes the specialization
+   (monomorphization?) of records.
  *)
 let synth_fun_name name arg_types =
   let args_n = List.map (fun t -> string_of_typ t) arg_types
@@ -175,7 +176,7 @@ let get_binding { bindings; _ } name =
 
 (* Try to figure out an [Ast.typ] from a provided [Ast.expr].
 
-   This needs a { t } so that it can look up module bindings.
+   This needs a [t] so that it can look up module bindings.
 *)
 let rec typ_of deps env = function
   | Record ms ->
@@ -294,7 +295,7 @@ let rec code_gen ?no_pointer:(no_ptr = false) ({ builder; _ } as deps) env = fun
      failwith "Unsupported AST node for JIT code generation."
 
 (* Generate an actual function application.  This will try to look up any
-   previously generated target for [name], including monomorphized versions,
+   previously generated target for [name], including specialized versions,
    before attempting to generate LLVM IR for what is needed at this application
    point.
 *)

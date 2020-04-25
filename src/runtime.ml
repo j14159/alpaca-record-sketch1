@@ -16,7 +16,8 @@ let create
   }
 
 let exec ?name:(name="th") ?dump_module:(dm = false) { m; cg } expr arg_t ret_t arg =
-  let ast = (Bind (name, Fun { args = []; body = (Code_gen.typ_of cg (Code_gen.new_env ()) expr, expr) })) in
+  let body_typ = Code_gen.typ_of cg (Code_gen.new_env ()) expr in
+  let ast = (Bind (name, Fun { args = []; body = (body_typ, expr) })) in
   let thunk = Code_gen.bind_gen cg ast in
   (* TODO:  make this conditional on something in `t`:  *)
   if dm then dump_module m else ();

@@ -19,6 +19,8 @@ val get_type : t -> Ast.typ -> lltype
 
 (** Generate LLVM IR for the provided [Ast.expr].
     
+    This will trigger specialization for any functions that deal with records.
+
     The [no_pointer] option should be [true] if the code generator should not
     return a pointer to the result.  This is important for record operations
     like {! Ast.Get_field }.  Getting a field from a record (LLVM struct)
@@ -32,8 +34,14 @@ val get_type : t -> Ast.typ -> lltype
  *)
 val code_gen : ?no_pointer : bool -> t -> env -> Ast.expr -> llvalue
 
+(** Bind an expression to a name in the current context (sort of a module).
+
+    Currently this will only accept functions.
+ *)
 val bind_gen : t -> Ast.bind -> llvalue
 
+(** Get the type of an expression based on the currently available bindings.
+ *)
 val typ_of : t -> env -> Ast.expr -> Ast.typ
 
 (* Used to debug in tests.  *)
