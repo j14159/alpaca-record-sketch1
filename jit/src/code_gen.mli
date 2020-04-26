@@ -8,7 +8,7 @@ type t
  *)
 type env
 
-val create : ?context : llcontext -> ?m : llmodule -> Ast.bind list -> t
+val create : ?context : llcontext -> ?m : llmodule -> ?pm:[`Module] PassManager.t -> Ast.bind list -> t
 
 val new_env : unit -> env
 

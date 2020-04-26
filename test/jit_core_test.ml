@@ -76,7 +76,7 @@ let test_get_field _ =
   (* Currently `exec` creates a named "thunk", and reusing the name doesn't
      appear to overwrite the previously defined one.
    *)
-  let res = Runtime.exec ~name:"th2" ~dump_module:false rt expr Ctypes.void Ctypes.int64_t () in
+  let res = Runtime.exec ~name:"th2" rt expr Ctypes.void Ctypes.int64_t () in
   assert_equal (Int64.of_int 85) res ~printer:Int64.to_string;
   (* Get all the function names again.  *)
   let fs = Runtime.with_module

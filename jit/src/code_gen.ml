@@ -8,7 +8,7 @@ type t = { bindings : (string, Ast.expr) Hashtbl.t
          ; llvm_context : llcontext
          ; builder : llbuilder
          ; m : llmodule
-         ; pm : [ `Function ] PassManager.t
+         ; pm : [ `Module ] PassManager.t
          ; memcpy : llvalue
          }
 
@@ -68,6 +68,7 @@ type env = Env.t
 let create
       ?context:(ctx = global_context ())
       ?m:(m = create_module ctx "a_module")
+      ?pm:(pm = PassManager.create ())
       bindings =
   let bs = Hashtbl.create (List.length bindings) in
   List.iter (fun (Bind (name, expr)) ->
@@ -96,7 +97,7 @@ let create
     ; builder = builder ctx
     ; bindings = bs
     ; m
-    ; pm = PassManager.create_function m
+    ; pm
     ; memcpy
   }
 
@@ -457,7 +458,7 @@ and gen_bind_proto ({m; llvm_context; _ } as deps) name { args; body = (ret_typ,
    to overwrite the struct from the caller as its last operation before
    returning.
  *)
-and bind_gen ({ builder = b; llvm_context = c; pm; _ } as deps) = function
+and bind_gen ({ builder = b; llvm_context = c; pm; m; _ } as deps) = function
   | Bind (name, Fun ({ args; body = (ret_typ, expr) } as fr)) ->
      let env = Env.create () in
      let ret_rec = synth_rec_return_name name in
@@ -491,7 +492,7 @@ and bind_gen ({ builder = b; llvm_context = c; pm; _ } as deps) = function
        end
      in
      Llvm_analysis.assert_valid_function f;
-     let _ = PassManager.run_function f pm in
+     let _ = PassManager.run_module m pm in
      f
   | _ ->
      failwith "Unsupported expression to bind."
