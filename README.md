@@ -42,7 +42,7 @@ Interpreter run time:   0.182004
 OCaml native run time:  0.010069
 ```
 
-Timings are in seconds using `Unix.gettimeofday`, "JIT compilation time" is "how long did the program spend on making LLVM IR and compiling it".
+Timings are in seconds using `Unix.gettimeofday`, "JIT compilation time" is "how long did the program spend on making LLVM IR and compiling it".  Results from my mid-2017 Dell XPS running Ubuntu `18.<something>`.
 
 This depends on early [ppx_test_match](https://github.com/j14159/ppx_test_match) work which I have not yet submitted to OPAM.  You will need to install that locally if you want to run any of the tests in this repository.
 
