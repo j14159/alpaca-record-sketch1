@@ -1,6 +1,6 @@
 Alpaca Record Sketch #1
 =====
-[Alpaca](http://alpaca-lang.org) has row-polymorphic records, but the Erlang VM doesn't really provide any support for this beyond maps.  This repository is a small experiment to explore JIT compilation of simple operations on polymorphic records, attempting to be something in the vein of Christopher Alexander's "constructive diagrams" (see [Notes on the Synthesis of Form](https://www.goodreads.com/fa/book/show/320553.Notes_on_the_Synthesis_of_Form).  I have tried to keep this quite simple/restricted, including only very basic operations:
+[Alpaca](http://alpaca-lang.org) has row-polymorphic records, but the Erlang VM doesn't really provide any support for this beyond maps.  This repository is a small experiment to explore JIT compilation of simple operations on polymorphic records, attempting to be something in the vein of Christopher Alexander's "constructive diagrams" (see [Notes on the Synthesis of Form](https://www.goodreads.com/fa/book/show/320553.Notes_on_the_Synthesis_of_Form)).  I have tried to keep this quite simple/restricted, including only very basic operations:
 
 - Record creation
 - Individual field retrieval
