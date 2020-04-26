@@ -29,8 +29,14 @@ let rec interp_eval ({ bindings; _ } as t) env ast_node =
      Hashtbl.find env v
   | Int _ ->
      ast_node
-  | Get_field (name, Record fields, _typ) ->
-     interp_get_field fields name
+  | Get_field (name, expr, _typ) ->
+     begin
+       match interp_eval t env expr with
+       | Record fields ->
+          interp_eval t env (interp_get_field fields name)
+       | _ ->
+          failwith "Can't get a field from a non-record."
+     end
   | Record ms ->
      let f = function
        | { v; _ } as r -> { r with v = interp_eval t env v }
@@ -49,7 +55,7 @@ let rec interp_eval ({ bindings; _ } as t) env ast_node =
        | Fun { args = fn_args; body = (_, body) } ->
           let arg_ns = List.map (fun (n, _) -> n) fn_args in
           List.iter2
-            (fun n a -> Hashtbl.add next_env n a)
+            (fun n a -> Hashtbl.add next_env n (interp_eval t env a))
             arg_ns
             args;
           interp_eval t next_env body
